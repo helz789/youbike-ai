@@ -5,11 +5,15 @@ import requests
 import pandas as pd
 import folium
 import streamlit as st
+import joblib
+from datetime import datetime
 from streamlit_folium import st_folium
 
 TAIPEI_URL = "https://tcgbusfs.blob.core.windows.net/dotapp/youbike/v2/youbike_immediate.json"
 NEW_TAIPEI_URL = "https://data.ntpc.gov.tw/api/datasets/010e5b15-3823-4b20-b401-b1cf000550c5/json?size=2000"
 
+BORROW_MODEL_FILE = "models/borrow_risk_model.joblib"
+RETURN_MODEL_FILE = "models/return_risk_model.joblib"
 
 @st.cache_data(ttl=60)
 def fetch_taipei_data() -> pd.DataFrame:
@@ -101,6 +105,47 @@ def load_all_data() -> pd.DataFrame:
     df = df.dropna(subset=["latitude", "longitude"])
     return df
 
+@st.cache_resource
+def load_models():
+    borrow_model = joblib.load(BORROW_MODEL_FILE)
+    return_model = joblib.load(RETURN_MODEL_FILE)
+    return borrow_model, return_model
+
+def predict_risk_for_current_data(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+
+    now = datetime.now()
+    df["snapshot_hour"] = now.hour
+    df["snapshot_minute"] = now.minute
+    df["snapshot_weekday"] = now.weekday()
+
+    borrow_model, return_model = load_models()
+
+    feature_cols = [
+        "city",
+        "sarea",
+        "latitude",
+        "longitude",
+        "quantity",
+        "available_rent_bikes",
+        "available_return_bikes",
+        "snapshot_hour",
+        "snapshot_minute",
+        "snapshot_weekday",
+    ]
+
+    df["pred_borrow_risk_prob_15m"] = 0.0
+    df["pred_return_risk_prob_15m"] = 0.0
+
+    active_mask = df["act"].astype(str) == "1"
+
+    if active_mask.any():
+        X_pred = df.loc[active_mask, feature_cols].copy()
+
+        df.loc[active_mask, "pred_borrow_risk_prob_15m"] = borrow_model.predict_proba(X_pred)[:, 1]
+        df.loc[active_mask, "pred_return_risk_prob_15m"] = return_model.predict_proba(X_pred)[:, 1]
+
+    return df
 
 def get_risk_label(row, mode: str) -> str:
     act = str(row.get("act", ""))
@@ -136,6 +181,32 @@ def get_risk_label(row, mode: str) -> str:
         return "中風險"
     return "正常"
 
+def get_predicted_risk_label(row, risk_mode: str) -> str:
+    act = str(row.get("act", ""))
+
+    if act != "1":
+        return "停用站"
+
+    borrow_prob = row.get("pred_borrow_risk_prob_15m", 0)
+    return_prob = row.get("pred_return_risk_prob_15m", 0)
+
+    if pd.isna(borrow_prob):
+        borrow_prob = 0
+    if pd.isna(return_prob):
+        return_prob = 0
+
+    if risk_mode == "我要借車":
+        score = borrow_prob
+    elif risk_mode == "我要還車":
+        score = return_prob
+    else:
+        score = max(borrow_prob, return_prob)
+
+    if score >= 0.60:
+        return "高風險"
+    if score >= 0.30:
+        return "中風險"
+    return "正常"
 
 def get_risk_color(risk_label: str) -> str:
     color_map = {
@@ -146,11 +217,54 @@ def get_risk_color(risk_label: str) -> str:
     }
     return color_map.get(risk_label, "blue")
 
-def render_sidebar_legend(mode: str):
+def render_sidebar_legend(risk_mode: str, display_mode: str):
     st.sidebar.markdown("---")
     st.sidebar.subheader("地圖圖例")
 
-    if mode == "我要借車":
+    if display_mode == "15分鐘後預測風險":
+        if risk_mode == "我要借車":
+            st.sidebar.markdown(
+                """
+<div style="line-height: 1.9;">
+<span style="color:red; font-size:18px;">●</span> 高風險：15 分鐘後借車高風險機率高<br>
+<span style="color:orange; font-size:18px;">●</span> 中風險：15 分鐘後借車風險中等<br>
+<span style="color:green; font-size:18px;">●</span> 正常：15 分鐘後借車風險低<br>
+<span style="color:gray; font-size:18px;">●</span> 停用站：站點未啟用
+</div>
+                """,
+                unsafe_allow_html=True,
+            )
+            return
+
+        if risk_mode == "我要還車":
+            st.sidebar.markdown(
+                """
+<div style="line-height: 1.9;">
+<span style="color:red; font-size:18px;">●</span> 高風險：15 分鐘後還車高風險機率高<br>
+<span style="color:orange; font-size:18px;">●</span> 中風險：15 分鐘後還車風險中等<br>
+<span style="color:green; font-size:18px;">●</span> 正常：15 分鐘後還車風險低<br>
+<span style="color:gray; font-size:18px;">●</span> 停用站：站點未啟用
+</div>
+                """,
+                unsafe_allow_html=True,
+            )
+            return
+
+        st.sidebar.markdown(
+            """
+<div style="line-height: 1.9;">
+<span style="color:red; font-size:18px;">●</span> 高風險：15 分鐘後借/還任一風險高<br>
+<span style="color:orange; font-size:18px;">●</span> 中風險：15 分鐘後借/還風險中等<br>
+<span style="color:green; font-size:18px;">●</span> 正常：15 分鐘後整體風險低<br>
+<span style="color:gray; font-size:18px;">●</span> 停用站：站點未啟用
+</div>
+            """,
+            unsafe_allow_html=True,
+        )
+        return
+
+    # 目前風險模式
+    if risk_mode == "我要借車":
         st.sidebar.markdown(
             """
 <div style="line-height: 1.9;">
@@ -164,7 +278,7 @@ def render_sidebar_legend(mode: str):
         )
         return
 
-    if mode == "我要還車":
+    if risk_mode == "我要還車":
         st.sidebar.markdown(
             """
 <div style="line-height: 1.9;">
@@ -251,6 +365,19 @@ def build_map(df: pd.DataFrame, risk_mode: str) -> folium.Map:
             f"https://www.google.com/maps/dir/?api=1&destination={lat},{lon}&travelmode=walking"
         )
 
+        borrow_prob_text = ""
+        return_prob_text = ""
+
+        if "pred_borrow_risk_prob_15m" in row.index:
+            borrow_prob = row.get("pred_borrow_risk_prob_15m", 0)
+            if pd.notna(borrow_prob):
+                borrow_prob_text = f"借車高風險機率(15分後)：{borrow_prob:.1%}<br>"
+
+        if "pred_return_risk_prob_15m" in row.index:
+            return_prob = row.get("pred_return_risk_prob_15m", 0)
+            if pd.notna(return_prob):
+                return_prob_text = f"還車高風險機率(15分後)：{return_prob:.1%}<br>"
+
         popup_html = f"""
         <b>{row.get('sna', '未知站點')}</b><br>
         城市：{row.get('city', '未知')}<br>
@@ -261,9 +388,10 @@ def build_map(df: pd.DataFrame, risk_mode: str) -> folium.Map:
         總車格：{row.get('quantity', 'N/A')}<br>
         評估模式：{risk_mode}<br>
         風險等級：{risk_label}<br>
-        更新時間：{row.get('info_time', 'N/A')}<br><br>
-
-        <a href="{google_maps_url}" target="_blank">  Google Maps 開啟位置</a><br>
+        更新時間：{row.get('info_time', row.get('snapshot_time', 'N/A'))}<br>
+        {borrow_prob_text}
+        {return_prob_text}<br>
+        <a href="{google_maps_url}" target="_blank"> 在 Google Maps 開啟位置</a><br>
         <a href="{google_maps_directions_url}" target="_blank"> 導航到這裡</a>
         """
 
@@ -297,13 +425,13 @@ def main():
         st.cache_data.clear()
         st.rerun()
 
-    try:
-        df = load_all_data()
-    except Exception as e:
-        st.error(f"資料抓取失敗：{e}")
-        return
-
     st.sidebar.header("篩選條件")
+
+    display_mode = st.sidebar.radio(
+        "顯示模式",
+        ["目前風險", "15分鐘後預測風險"],
+        index=0,
+    )
 
     risk_mode = st.sidebar.radio(
         "使用情境",
@@ -311,10 +439,23 @@ def main():
         index=0,
     )
 
-    df["risk_label"] = df.apply(
-        lambda row: get_risk_label(row, risk_mode),
-        axis=1
-    )
+    try:
+        df = load_all_data()
+
+        if display_mode == "目前風險":
+            df["risk_label"] = df.apply(
+                lambda row: get_risk_label(row, risk_mode),
+                axis=1
+            )
+        else:
+            df = predict_risk_for_current_data(df)
+            df["risk_label"] = df.apply(
+                lambda row: get_predicted_risk_label(row, risk_mode),
+                axis=1
+            )
+    except Exception as e:
+        st.error(f"資料載入失敗：{e}")
+        return
 
     city_options = sorted(df["city"].dropna().unique().tolist())
     selected_cities = st.sidebar.multiselect(
@@ -340,7 +481,7 @@ def main():
 
     keyword = st.sidebar.text_input("搜尋站名", value="")
 
-    render_sidebar_legend(risk_mode)
+    render_sidebar_legend(risk_mode, display_mode)
 
     filtered_df = filter_data(
         df=df,
