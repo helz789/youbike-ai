@@ -130,6 +130,21 @@ def get_risk_color(risk_label: str) -> str:
     }
     return color_map.get(risk_label, "blue")
 
+def render_sidebar_legend():
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("地圖圖例")
+
+    st.sidebar.markdown(
+        """
+<div style="line-height: 1.9;">
+<span style="color:red; font-size:18px;">●</span> 高風險：完全沒車可借，或完全沒位可還<br>
+<span style="color:orange; font-size:18px;">●</span> 中風險：可借車數 ≤ 3，或可還車位 ≤ 3<br>
+<span style="color:green; font-size:18px;">●</span> 正常：其餘正常站點<br>
+<span style="color:gray; font-size:18px;">●</span> 停用站：站點未啟用
+</div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 def filter_data(
     df: pd.DataFrame,
@@ -160,12 +175,25 @@ def filter_data(
 
 def build_map(df: pd.DataFrame) -> folium.Map:
     if df.empty:
-        return folium.Map(location=[25.03, 121.52], zoom_start=11)
+        m = folium.Map(location=[25.03, 121.52], zoom_start=11, tiles=None)
+        folium.TileLayer(
+            tiles="CartoDB positron",
+            name="淡色底圖",
+            control=False,
+            opacity=0.72,
+        ).add_to(m)
+        return m
 
     center_lat = df["latitude"].mean()
     center_lon = df["longitude"].mean()
 
-    m = folium.Map(location=[center_lat, center_lon], zoom_start=11)
+    m = folium.Map(location=[center_lat, center_lon], zoom_start=11, tiles=None)
+    folium.TileLayer(
+        tiles="CartoDB positron",
+        name="淡色底圖",
+        control=False,
+        opacity=0.72,
+    ).add_to(m)
 
     for _, row in df.iterrows():
         risk_label = row["risk_label"]
@@ -190,7 +218,7 @@ def build_map(df: pd.DataFrame) -> folium.Map:
             color=color,
             fill=True,
             fill_color=color,
-            fill_opacity=0.8,
+            fill_opacity=0.9,
             weight=1,
         ).add_to(m)
 
@@ -246,6 +274,7 @@ def main():
     )
 
     keyword = st.sidebar.text_input("搜尋站名", value="")
+    render_sidebar_legend()
 
     filtered_df = filter_data(
         df=df,
@@ -264,16 +293,6 @@ def main():
     st.subheader("站點地圖")
     map_obj = build_map(filtered_df)
     st_folium(map_obj, width=1200, height=680)
-
-    st.subheader("風險規則")
-    st.markdown(
-        """
-- 高風險：完全沒車可借，或完全沒位可還  
-- 中風險：可借車數 ≤ 3，或可還車位 ≤ 3  
-- 正常：其餘正常站點  
-- 停用站：站點未啟用
-        """
-    )
 
     st.subheader("資料表")
     show_cols = [
