@@ -1,4 +1,4 @@
-# 這是抓 YouBike 時資料的程式
+# 這是抓 YouBike 資料的程式
 # 用 requests.get()抓官方 JSON
 # 用 pandas.DataFrame() 把 JSON 轉成 DataFrame
 # 用目前時間命名檔案，存成 CSV
