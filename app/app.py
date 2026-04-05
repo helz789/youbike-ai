@@ -1,5 +1,5 @@
-# 這是 Streamlit App 的程式
-# 會抓 YouBike 即時資料，顯示在地圖上
+# 這是 Streamlit App 的主程式
+# 主要功能：  
 
 import requests
 import pandas as pd
@@ -7,19 +7,105 @@ import folium
 import streamlit as st
 from streamlit_folium import st_folium
 
-URL = "https://tcgbusfs.blob.core.windows.net/dotapp/youbike/v2/youbike_immediate.json"
+TAIPEI_URL = "https://tcgbusfs.blob.core.windows.net/dotapp/youbike/v2/youbike_immediate.json"
+NEW_TAIPEI_URL = "https://data.ntpc.gov.tw/api/datasets/010e5b15-3823-4b20-b401-b1cf000550c5/json?size=2000"
 
 
-def fetch_youbike_data() -> pd.DataFrame:
-    response = requests.get(URL, timeout=30)
+@st.cache_data(ttl=60)
+def fetch_taipei_data() -> pd.DataFrame:
+    response = requests.get(TAIPEI_URL, timeout=30)
     response.raise_for_status()
-    data = response.json()
-    return pd.DataFrame(data)
+    df = pd.DataFrame(response.json())
 
-def get_risk_color(row) -> str:
+    df["city"] = "臺北市"
+
+    keep_cols = [
+        "city",
+        "sno",
+        "sna",
+        "sarea",
+        "ar",
+        "quantity",
+        "available_rent_bikes",
+        "available_return_bikes",
+        "latitude",
+        "longitude",
+        "act",
+        "infoTime",
+    ]
+    existing_cols = [c for c in keep_cols if c in df.columns]
+    df = df[existing_cols].copy()
+
+    if "infoTime" in df.columns:
+        df = df.rename(columns={"infoTime": "info_time"})
+
+    return df
+
+
+@st.cache_data(ttl=300)
+def fetch_new_taipei_data() -> pd.DataFrame:
+    response = requests.get(NEW_TAIPEI_URL, timeout=30)
+    response.raise_for_status()
+    df = pd.DataFrame(response.json())
+
+    df = df.rename(
+        columns={
+            "scity": "city",
+            "tot_quantity": "quantity",
+            "sbi_quantity": "available_rent_bikes",
+            "bemp": "available_return_bikes",
+            "lat": "latitude",
+            "lng": "longitude",
+            "mday": "info_time",
+        }
+    )
+
+    keep_cols = [
+        "city",
+        "sno",
+        "sna",
+        "sarea",
+        "ar",
+        "quantity",
+        "available_rent_bikes",
+        "available_return_bikes",
+        "latitude",
+        "longitude",
+        "act",
+        "info_time",
+    ]
+    existing_cols = [c for c in keep_cols if c in df.columns]
+    return df[existing_cols].copy()
+
+
+def load_all_data() -> pd.DataFrame:
+    taipei_df = fetch_taipei_data()
+    new_taipei_df = fetch_new_taipei_data()
+
+    df = pd.concat([taipei_df, new_taipei_df], ignore_index=True)
+
+    numeric_cols = [
+        "quantity",
+        "available_rent_bikes",
+        "available_return_bikes",
+        "latitude",
+        "longitude",
+    ]
+    for col in numeric_cols:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    if "act" in df.columns:
+        df["act"] = df["act"].astype(str)
+
+    df = df.dropna(subset=["latitude", "longitude"])
+    return df
+
+
+def get_risk_label(row) -> str:
     act = str(row.get("act", ""))
-    rent = pd.to_numeric(row.get("available_rent_bikes", 0), errors="coerce")
-    ret = pd.to_numeric(row.get("available_return_bikes", 0), errors="coerce")
+    rent = row.get("available_rent_bikes", 0)
+    ret = row.get("available_return_bikes", 0)
 
     if pd.isna(rent):
         rent = 0
@@ -27,108 +113,182 @@ def get_risk_color(row) -> str:
         ret = 0
 
     if act != "1":
-        return "gray"
+        return "停用站"
     if rent == 0 or ret == 0:
-        return "red"
+        return "高風險"
     if rent <= 3 or ret <= 3:
-        return "orange"
-    return "green"
+        return "中風險"
+    return "正常"
 
 
-def main():
-    st.set_page_config(page_title="YouBike 即時風險地圖", layout="wide")
-    st.title("YouBike 即時風險地圖")
-    st.write("顯示臺北市 YouBike 站點的即時借車／還車風險。")
+def get_risk_color(risk_label: str) -> str:
+    color_map = {
+        "停用站": "gray",
+        "高風險": "red",
+        "中風險": "orange",
+        "正常": "green",
+    }
+    return color_map.get(risk_label, "blue")
 
-    if st.button("重新整理資料"):
-        st.rerun()
 
-    try:
-        df = fetch_youbike_data()
-    except Exception as e:
-        st.error(f"資料抓取失敗：{e}")
-        return
+def filter_data(
+    df: pd.DataFrame,
+    selected_cities,
+    selected_districts,
+    selected_risks,
+    keyword,
+) -> pd.DataFrame:
+    result = df.copy()
 
-    numeric_cols = [
-        "latitude",
-        "longitude",
-        "available_rent_bikes",
-        "available_return_bikes",
-        "quantity",
-    ]
-    for col in numeric_cols:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors="coerce")
+    if selected_cities:
+        result = result[result["city"].isin(selected_cities)]
 
-    df = df.dropna(subset=["latitude", "longitude"])
+    if selected_districts:
+        result = result[result["sarea"].isin(selected_districts)]
 
-    st.subheader("資料概況")
-    col1, col2, col3 = st.columns(3)
+    if selected_risks:
+        result = result[result["risk_label"].isin(selected_risks)]
 
-    active_count = (df["act"].astype(str) == "1").sum() if "act" in df.columns else 0
-    red_count = sum(get_risk_color(row) == "red" for _, row in df.iterrows())
+    keyword = keyword.strip()
+    if keyword:
+        result = result[
+            result["sna"].astype(str).str.contains(keyword, case=False, na=False)
+        ]
 
-    col1.metric("站點總數", len(df))
-    col2.metric("啟用站點數", int(active_count))
-    col3.metric("高風險站點數", int(red_count))
+    return result
 
-    m = folium.Map(location=[25.0418, 121.5500], zoom_start=12)
+
+def build_map(df: pd.DataFrame) -> folium.Map:
+    if df.empty:
+        return folium.Map(location=[25.03, 121.52], zoom_start=11)
+
+    center_lat = df["latitude"].mean()
+    center_lon = df["longitude"].mean()
+
+    m = folium.Map(location=[center_lat, center_lon], zoom_start=11)
 
     for _, row in df.iterrows():
-        color = get_risk_color(row)
-
-        station_name = row.get("sna", "未知站點")
-        area = row.get("sarea", "未知行政區")
-        rent = row.get("available_rent_bikes", "N/A")
-        ret = row.get("available_return_bikes", "N/A")
-        quantity = row.get("quantity", "N/A")
-        info_time = row.get("infoTime", "N/A")
+        risk_label = row["risk_label"]
+        color = get_risk_color(risk_label)
 
         popup_html = f"""
-        <b>{station_name}</b><br>
-        行政區：{area}<br>
-        可借車數：{rent}<br>
-        可還車位：{ret}<br>
-        總車格：{quantity}<br>
-        更新時間：{info_time}
+        <b>{row.get('sna', '未知站點')}</b><br>
+        城市：{row.get('city', '未知')}<br>
+        行政區：{row.get('sarea', '未知')}<br>
+        地址：{row.get('ar', '未知')}<br>
+        可借車數：{row.get('available_rent_bikes', 'N/A')}<br>
+        可還車位：{row.get('available_return_bikes', 'N/A')}<br>
+        總車格：{row.get('quantity', 'N/A')}<br>
+        風險等級：{risk_label}<br>
+        更新時間：{row.get('info_time', 'N/A')}
         """
 
         folium.CircleMarker(
             location=[row["latitude"], row["longitude"]],
-            radius=6,
-            popup=folium.Popup(popup_html, max_width=300),
+            radius=5,
+            popup=folium.Popup(popup_html, max_width=320),
             color=color,
             fill=True,
             fill_color=color,
             fill_opacity=0.8,
+            weight=1,
         ).add_to(m)
 
-    st.subheader("站點地圖")
-    st_folium(m, width=1200, height=650)
+    bounds = [
+        [df["latitude"].min(), df["longitude"].min()],
+        [df["latitude"].max(), df["longitude"].max()],
+    ]
+    m.fit_bounds(bounds)
 
-    st.subheader("顏色規則")
+    return m
+
+
+def main():
+    st.set_page_config(page_title="雙北 YouBike 即時風險地圖", layout="wide")
+
+    st.title("雙北 YouBike 即時風險地圖")
+    st.caption("臺北市 + 新北市即時站點資料")
+
+    if st.button("重新整理資料"):
+        st.cache_data.clear()
+        st.rerun()
+
+    try:
+        df = load_all_data()
+    except Exception as e:
+        st.error(f"資料抓取失敗：{e}")
+        return
+
+    df["risk_label"] = df.apply(get_risk_label, axis=1)
+
+    st.sidebar.header("篩選條件")
+
+    city_options = sorted(df["city"].dropna().unique().tolist())
+    selected_cities = st.sidebar.multiselect(
+        "選擇城市",
+        options=city_options,
+        default=city_options,
+    )
+
+    district_source = df[df["city"].isin(selected_cities)] if selected_cities else df
+    district_options = sorted(district_source["sarea"].dropna().unique().tolist())
+    selected_districts = st.sidebar.multiselect(
+        "選擇行政區",
+        options=district_options,
+        default=[],
+    )
+
+    risk_options = ["高風險", "中風險", "正常", "停用站"]
+    selected_risks = st.sidebar.multiselect(
+        "選擇風險等級",
+        options=risk_options,
+        default=risk_options,
+    )
+
+    keyword = st.sidebar.text_input("搜尋站名", value="")
+
+    filtered_df = filter_data(
+        df=df,
+        selected_cities=selected_cities,
+        selected_districts=selected_districts,
+        selected_risks=selected_risks,
+        keyword=keyword,
+    )
+
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("目前顯示站點數", len(filtered_df))
+    col2.metric("高風險", int((filtered_df["risk_label"] == "高風險").sum()))
+    col3.metric("中風險", int((filtered_df["risk_label"] == "中風險").sum()))
+    col4.metric("停用站", int((filtered_df["risk_label"] == "停用站").sum()))
+
+    st.subheader("站點地圖")
+    map_obj = build_map(filtered_df)
+    st_folium(map_obj, width=1200, height=680)
+
+    st.subheader("風險規則")
     st.markdown(
         """
-- 灰色：站點未啟用
-- 紅色：完全沒車可借，或完全沒位可還
-- 橘色：可借車數 ≤ 3，或可還車位 ≤ 3
-- 綠色：目前狀態正常
+- 高風險：完全沒車可借，或完全沒位可還  
+- 中風險：可借車數 ≤ 3，或可還車位 ≤ 3  
+- 正常：其餘正常站點  
+- 停用站：站點未啟用
         """
     )
 
-    st.subheader("前 10 筆資料")
+    st.subheader("資料表")
     show_cols = [
+        "city",
         "sno",
         "sna",
         "sarea",
         "available_rent_bikes",
         "available_return_bikes",
         "quantity",
-        "act",
-        "infoTime",
+        "risk_label",
+        "info_time",
     ]
-    existing_cols = [c for c in show_cols if c in df.columns]
-    st.dataframe(df[existing_cols].head(10), width="stretch")
+    existing_cols = [c for c in show_cols if c in filtered_df.columns]
+    st.dataframe(filtered_df[existing_cols], width="stretch", height=350)
 
 
 if __name__ == "__main__":
