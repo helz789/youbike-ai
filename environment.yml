@@ -1,0 +1,16 @@
+name: youbike-ai
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - pandas
+  - geopandas
+  - requests
+  - scikit-learn
+  - folium
+  - jupyter
+  - ipykernel
+  - pip
+  - pip:
+      - streamlit
+      - streamlit-folium
