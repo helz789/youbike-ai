@@ -102,7 +102,7 @@ def load_all_data() -> pd.DataFrame:
     return df
 
 
-def get_risk_label(row) -> str:
+def get_risk_label(row, mode: str) -> str:
     act = str(row.get("act", ""))
     rent = row.get("available_rent_bikes", 0)
     ret = row.get("available_return_bikes", 0)
@@ -114,6 +114,22 @@ def get_risk_label(row) -> str:
 
     if act != "1":
         return "停用站"
+
+    if mode == "我要借車":
+        if rent == 0:
+            return "高風險"
+        if rent <= 3:
+            return "中風險"
+        return "正常"
+
+    if mode == "我要還車":
+        if ret == 0:
+            return "高風險"
+        if ret <= 3:
+            return "中風險"
+        return "正常"
+
+    # 預設：一起看
     if rent == 0 or ret == 0:
         return "高風險"
     if rent <= 3 or ret <= 3:
@@ -130,14 +146,42 @@ def get_risk_color(risk_label: str) -> str:
     }
     return color_map.get(risk_label, "blue")
 
-def render_sidebar_legend():
+def render_sidebar_legend(mode: str):
     st.sidebar.markdown("---")
     st.sidebar.subheader("地圖圖例")
+
+    if mode == "我要借車":
+        st.sidebar.markdown(
+            """
+<div style="line-height: 1.9;">
+<span style="color:red; font-size:18px;">●</span> 高風險：完全沒車可借<br>
+<span style="color:orange; font-size:18px;">●</span> 中風險：可借車數 ≤ 3<br>
+<span style="color:green; font-size:18px;">●</span> 正常：可借車數 > 3<br>
+<span style="color:gray; font-size:18px;">●</span> 停用站：站點未啟用
+</div>
+            """,
+            unsafe_allow_html=True,
+        )
+        return
+
+    if mode == "我要還車":
+        st.sidebar.markdown(
+            """
+<div style="line-height: 1.9;">
+<span style="color:red; font-size:18px;">●</span> 高風險：完全沒位可還<br>
+<span style="color:orange; font-size:18px;">●</span> 中風險：可還車位 ≤ 3<br>
+<span style="color:green; font-size:18px;">●</span> 正常：可還車位 > 3<br>
+<span style="color:gray; font-size:18px;">●</span> 停用站：站點未啟用
+</div>
+            """,
+            unsafe_allow_html=True,
+        )
+        return
 
     st.sidebar.markdown(
         """
 <div style="line-height: 1.9;">
-<span style="color:red; font-size:18px;">●</span> 高風險：完全沒車可借，或完全沒位可還<br>
+<span style="color:red; font-size:18px;">●</span> 高風險：沒車可借，或沒位可還<br>
 <span style="color:orange; font-size:18px;">●</span> 中風險：可借車數 ≤ 3，或可還車位 ≤ 3<br>
 <span style="color:green; font-size:18px;">●</span> 正常：其餘正常站點<br>
 <span style="color:gray; font-size:18px;">●</span> 停用站：站點未啟用
@@ -173,7 +217,7 @@ def filter_data(
     return result
 
 
-def build_map(df: pd.DataFrame) -> folium.Map:
+def build_map(df: pd.DataFrame, risk_mode: str) -> folium.Map:
     if df.empty:
         m = folium.Map(location=[25.03, 121.52], zoom_start=11, tiles=None)
         folium.TileLayer(
@@ -198,6 +242,14 @@ def build_map(df: pd.DataFrame) -> folium.Map:
     for _, row in df.iterrows():
         risk_label = row["risk_label"]
         color = get_risk_color(risk_label)
+        lat = row["latitude"]
+        lon = row["longitude"]
+        station_name = str(row.get("sna", "未知站點"))
+
+        google_maps_url = f"https://www.google.com/maps/search/?api=1&query={lat},{lon}"
+        google_maps_directions_url = (
+            f"https://www.google.com/maps/dir/?api=1&destination={lat},{lon}&travelmode=walking"
+        )
 
         popup_html = f"""
         <b>{row.get('sna', '未知站點')}</b><br>
@@ -207,8 +259,12 @@ def build_map(df: pd.DataFrame) -> folium.Map:
         可借車數：{row.get('available_rent_bikes', 'N/A')}<br>
         可還車位：{row.get('available_return_bikes', 'N/A')}<br>
         總車格：{row.get('quantity', 'N/A')}<br>
+        評估模式：{risk_mode}<br>
         風險等級：{risk_label}<br>
-        更新時間：{row.get('info_time', 'N/A')}
+        更新時間：{row.get('info_time', 'N/A')}<br><br>
+
+        <a href="{google_maps_url}" target="_blank">  Google Maps 開啟位置</a><br>
+        <a href="{google_maps_directions_url}" target="_blank"> 導航到這裡</a>
         """
 
         folium.CircleMarker(
@@ -247,9 +303,18 @@ def main():
         st.error(f"資料抓取失敗：{e}")
         return
 
-    df["risk_label"] = df.apply(get_risk_label, axis=1)
-
     st.sidebar.header("篩選條件")
+
+    risk_mode = st.sidebar.radio(
+        "使用情境",
+        ["我要借車", "我要還車", "一起看"],
+        index=0,
+    )
+
+    df["risk_label"] = df.apply(
+        lambda row: get_risk_label(row, risk_mode),
+        axis=1
+    )
 
     city_options = sorted(df["city"].dropna().unique().tolist())
     selected_cities = st.sidebar.multiselect(
@@ -274,7 +339,8 @@ def main():
     )
 
     keyword = st.sidebar.text_input("搜尋站名", value="")
-    render_sidebar_legend()
+
+    render_sidebar_legend(risk_mode)
 
     filtered_df = filter_data(
         df=df,
@@ -291,7 +357,7 @@ def main():
     col4.metric("停用站", int((filtered_df["risk_label"] == "停用站").sum()))
 
     st.subheader("站點地圖")
-    map_obj = build_map(filtered_df)
+    map_obj = build_map(filtered_df, risk_mode)
     st_folium(map_obj, width=1200, height=680)
 
     st.subheader("資料表")
